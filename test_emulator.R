@@ -178,3 +178,8 @@ get_samples <- nimbleFunction(
     return(output)
   }
 )
+
+
+xstar_samples <- get_samples(samples, z, zNew, dist11, dist22, dist21)
+cget_samples <- compileNimble(get_samples)
+xstar_samples2 <- cget_samples(samples, z, Znew, dist11, dist22, dist21)
