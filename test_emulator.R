@@ -1,7 +1,7 @@
 library(nimble)
-nregions <- 134 # nrow
+nregions <- 10 # nrow
 
-y <- rnorm(nregions, 5, 0.1) # this is what we try to model / Liklihood
+y <- rnorm(nregions, 5, 0.1) # this is what we try to model / Liklihood (could SSQ)
 
 
 expcov <- nimbleFunction(     
@@ -35,9 +35,8 @@ code <- nimbleCode({
   }
 })
 
-locs <-  as.matrix(data.frame(a = rnorm(134), # two param space
-                              b = rnorm(134),
-                              c = rnorm(134)
+locs <-  as.matrix(data.frame(a = rnorm(nregions), # two param space
+                              b = rnorm(nregions)
                               )
                    )
 
@@ -62,11 +61,21 @@ inits$x <- inits$x[ , 1]  # so can give nimble a vector rather than one-column m
 model <- nimbleModel(code, constants = constants, data = data, inits = inits)
 cModel <- compileNimble(model)
 
+# 
+ggraph(model$graph, layout = 'auto') +
+  geom_edge_link() +
+  geom_node_point() +
+  geom_node_label(aes(label=name))+
+  theme_light()+
+  theme(legend.position = 'bottom')
+
+
+#----------------
 conf <- configureMCMC(model)
 conf$addMonitors('x')
-conf$removeSamplers('x[1:134]')
+conf$removeSamplers('x[1:10]')
 ## Changing a tunable parameter in the adaptation of RW_block makes a big difference.
-conf$addSampler('x[1:134]', 'RW_block', control = list(adaptFactorExponent = 0.25))
+conf$addSampler('x[1:10]', 'RW_block', control = list(adaptFactorExponent = 0.25))
 
 MCMC <- buildMCMC(conf)
 cMCMC <- compileNimble(MCMC, project = cModel)
@@ -78,14 +87,63 @@ mcmcplots::mcmcplot(samples)
 #post-hoc posterior sampling of the Gaussian process 
 
 
-newlocs <- rbind(c(2.6, 6.7, 4),
-                 c(2.61, 6.69, 3),
-                 c(2.59, 6.69, 1)
+newlocs <- rbind(c(2.6, 6.7)
 )
 
 dist11 <- fields::rdist(locs)
 dist21 <- fields::rdist(newlocs, locs)
 dist22 <- fields::rdist(newlocs)
+
+
+#----------------- Chris's solution
+
+get_samples <- nimbleFunction(
+  run = function(samples = double(2), z = double(1), zNew = double(1), 
+                 dist11 = double(2), dist22 = double(2), dist21 = double(2)) {
+    returnType(double(2))
+   
+    m <- dim(samples)[1]
+    nstar <- dim(dist21)[2]
+    output <- matrix(0, nrow = m, ncol = nstar)
+    for(i in 1:m) {
+      # Extract parameter values from the input matrix based on numeric column indexes.
+      # Inelegant because hard-coded based on looking at column names of samples matrix.
+      mu0 <- samples[i, 1]
+      #beta <- samples[i, 1]
+      rho <- samples[i, 2]
+      sigma <- samples[i, 4]
+      x <- samples[i, 5:14]
+      mu <- mu0 #+ beta*z no covariate
+      muNew <- mu0 #+ beta*zNew
+      
+      #browser()
+      #--------------
+      n <- length(muNew)
+      sigma2 <- sigma*sigma
+      C22 <- sigma2 * exp(-dist22 / rho)
+      C11 <- sigma2 * exp(-dist11 / rho)
+      C21 <- sigma2 * exp(-dist21 / rho)
+      # Note that this could be made a bit more efficient by using the Cholesky
+      # decomposition rather than solve().
+      xstar <- muNew + (C21 %*% solve(C11, x - mu))[,1]
+      xstar <- xstar + (t(chol(C22 - C21 %*% solve(C11, t(C21)))))[,1]
+      # Get other parameters
+      output[i, ] <-xstar
+    }
+    return(output)
+  }
+)
+
+
+xstar_samples <- get_samples(samples, locs, newlocs, dist11, dist22, dist21)
+
+
+
+cget_samples <- compileNimble(get_samples)
+xstar_samples2 <- cget_samples(samples, z, Znew, dist11, dist22, dist21)
+
+
+#---------------- My failed attempt
 
 sample_xstar <- nimbleFunction({
   # need types for inputs
@@ -94,8 +152,8 @@ sample_xstar <- nimbleFunction({
                  sigma=double(0),
                  rho=double(0),
                  dist11=double(2), dist22=double(2), dist21=double(2)) {
-     returnType(double(2))
-
+    returnType(double(2))
+    
     x ~ dmnorm(mu+dist21%*%solve(dist11)%*%(x−mu),
                dist22-dist21%*%solve(dist11)%*%t(dist21))
     
@@ -109,13 +167,13 @@ get_samples <- nimbleFunction(
                  dist11=double(2),
                  dist22=double(2),
                  dist21=double(2)
-                 ) {
+  ) {
     returnType(double(2))
     browser()
     m <- dim(samples)[1]
     nstar <- 3
     output <- matrix(0, nrow = m, ncol = nstar)
-
+    
     for(i in 1:m) {
       # Extract parameter values from the input matrix based on numeric column indexes
       mu <- samples[i, 2]
@@ -134,52 +192,3 @@ xstar_samples <- get_samples(samples, dist11, dist22, dist21)
 
 cget_samples <- compileNimble(get_samples)
 xstar_samples2 <- cget_samples(samples, dist11, dist22, dist21)
-
-
-
-#----------------- Chris's solution
-sample_xstar <- nimbleFunction({
-  # need types for inputs
-  run = function(x = double(1), mu = double(1), muNew = double(1), sigma = double(0), rho = double(0), 
-                 dist11 = double(2), dist22 = double(2), dist21 = double(2)) {
-    returnType(double(1))
-    n <- length(muNew)
-    sigma2 <- sigma*sigma
-    C22 <- sigma2 * exp(-dist22 / rho)
-    C11 <- sigma2 * exp(-dist11 / rho)
-    C21 <- sigma2 * exp(-dist21 / rho)
-    # Note that this could be made a bit more efficient by using the Cholesky
-    # decomposition rather than solve().
-    xstar <- munew + (C21 %*% solve(C11, x - mu))[,1]
-    xstar <- xstar + (t(chol(C22 - C21 %*% solve(C11, t(C21)))) %*% rnorm(n))[,1]
-    return(xstar)
-  }
-})
-get_samples <- nimbleFunction(
-  run = function(samples = double(2), z = double(1), zNew = double(1), 
-                 dist11 = double(2), dist22 = double(2), dist21 = double(2)) {
-    returnType(double(2))
-    m <- dim(samples)[1]
-    nstar <- dim(dst21)[2]
-    output <- matrix(0, nrow = m, ncol = nstar)
-    for(i in 1:m) {
-      # Extract parameter values from the input matrix based on numeric column indexes.
-      # Inelegant because hard-coded based on looking at column names of samples matrix.
-      mu0 <- output[i, 2]
-      beta <- output[i, 1]
-      rho <- output[i, 3]
-      sigma <- output[i, 4]
-      x <- output[i, 5:138]
-      mu <- mu0 + beta*z
-      muNew <- mu0 + beta*zNew
-      # Get other parameters
-      output[i, ] <- sample_xstar(x, mu, muNew, sigma, rho, dist11, dist22, dist21)
-    }
-    return(output)
-  }
-)
-
-
-xstar_samples <- get_samples(samples, z, zNew, dist11, dist22, dist21)
-cget_samples <- compileNimble(get_samples)
-xstar_samples2 <- cget_samples(samples, z, Znew, dist11, dist22, dist21)
